@@ -1,0 +1,223 @@
+"""
+Author:Xiaoxue Duan
+Date: 2023-08-24
+Purpose: create data ETL pipelines on Tesla roof data and generate csv files.
+
+Steps:
+ 1. Read the JSON files.
+ 2. Validate and clean the data.
+ 3. Transform the data into a suitable data model.
+ 4. Output the results in a CSV file.
+ 5. Dockerize the solution.(sh.file)
+
+"""
+import json
+import os
+import pandas as pd
+
+# Step 1: Read JSON files
+json_folder = "roof_models"
+json_files = [file for file in os.listdir(json_folder) if file.endswith(".json")]
+data = []
+
+
+# List to keep track of problematic files
+problematic_files = []
+
+for file in json_files:
+    with open(os.path.join(json_folder, file)) as json_file:
+        try:
+            temp = json.load(json_file)
+            data.append(temp)
+        except json.JSONDecodeError:
+            problematic_files.append(file)  # Add problematic file to the list
+
+if problematic_files:
+    print("The following files are not in correct JSON format:")
+    for file in problematic_files:
+        print(file)
+
+
+# Step 2: Validate and clean data 
+
+# Manually updated JSON file roof_9.json. it is not in json format, I use online json validater and update the format, upload this file as roof_9_new.
+updated_file_name = "roof_9_new.json"
+with open(os.path.join(json_folder, updated_file_name)) as updated_json_file:
+    updated_data = json.load(updated_json_file)
+    data.append(updated_data)
+    print(f"{updated_file_name} have been updated and add to the data")
+  
+# roof_6.json:  building["mountingPlanes"] field has a typo as "mountingPlaness".
+# this part can be automated in the future.
+for home in data:
+    # Correct the typo in mountingPlanes field for roof_6.json
+    if "siteModel" in home and "buildings" in home["siteModel"]:
+        for building in home["siteModel"]["buildings"]:
+            if "mountingPlaness" in building:
+                building["mountingPlanes"] = building.pop("mountingPlaness")
+
+# # Step 3: Transform data into DataFrames
+building_dim_list = []
+building_fact_list = []
+mounting_plane_angle_list = []
+feature_engineering_roof_list=[]
+unique_index_counter = 1
+unique_feature_id_counter = 1
+
+for home_index, home in enumerate(data):
+
+    home_id = home.get("id")
+    installation_id = home.get("instalationId")
+    date_created = home.get("dateCreated")
+    version = home.get("version")
+    external_sitemodel_sourceid = home.get("externalSiteModelSourceId")
+    buildings = home["siteModel"].get("buildings")
+    units = home["siteModel"].get("units")
+    north_vector = home["siteModel"].get("northVector")
+    heading_vector = home["siteModel"].get("headingVector")
+    obstructions = home["siteModel"].get("obstructions")
+
+   
+
+
+    for building_index, building in enumerate(buildings):
+                     
+        
+        building_id = f"{home_index}_{building_index}"
+        mounting_planes = building.get("mountingPlanes")
+        polygon=building.get("polygon")
+        total_roof_area = building.get("totalRoofArea")
+        is_primary_building = building.get("isPrimaryBuilding")
+        building_polygon = building.get("polygon")
+      
+        building_dim_row = {
+            "home_id": home_id,
+            "building_id": building_id,
+            "is_primary_building": is_primary_building,
+            "total_roof_area": total_roof_area,
+            "installation_id": installation_id,
+            "external_sitemodel_sourceid": external_sitemodel_sourceid,      
+            "version": version,
+            "date_created": date_created
+        }
+        building_dim_list.append(building_dim_row)
+
+        for mounting_plane in mounting_planes:
+            unique_index = unique_index_counter
+            unique_index_counter += 1
+
+            mounting_plane_id = mounting_plane.get("id")
+            area = mounting_plane.get("area")
+            roof_material_type = mounting_plane.get("roofMaterialType")
+            pitch_angle = mounting_plane.get("pitchAngle")
+            azimuth_angle = mounting_plane.get("azimuthAngle")
+            azimuth_vector = mounting_plane.get("azimuthVector")
+            centroid = mounting_plane.get("centroid")
+            coordinate_system=mounting_plane.get("coordinateSystem")
+            mp_polygon=mounting_plane.get("polygon")
+
+          
+            building_fact_row = {
+                "building_fact_id": unique_index,
+                "building_id": building_id,
+                "mounting_plane_id": mounting_plane_id,
+                "roof_material_type": roof_material_type,
+                "area": area,
+                "version": version,
+                "date_created": date_created
+            }
+            building_fact_list.append(building_fact_row)
+
+            mounting_plane_angle_row = {
+                "building_fact_id": unique_index,
+                "building_id": building_id,
+                "mounting_plane_id": mounting_plane_id,
+                "pitch_angle": pitch_angle,
+                "azimuth_angle": azimuth_angle,
+                "azimuth_vector_x": azimuth_vector.get("x"),
+                "azimuth_vector_y": azimuth_vector.get("y"),
+                "azimuth_vector_z": azimuth_vector.get("z"),
+                "centroid_x": centroid.get("x"),
+                "centroid_y": centroid.get("y"),
+                "centroid_z": centroid.get("z"),
+                "version": version,
+                "date_created": date_created
+            }
+            mounting_plane_angle_list.append(mounting_plane_angle_row)
+    
+    if obstructions:
+        # Create an empty list to hold the dictionaries for each obstruction
+        obstruction_dicts = []
+        # Iterate through each obstruction and create a dictionary for DataFrame
+        for obstruction in obstructions:
+            # Initialize an empty list to hold edge dictionaries
+            edges = []
+            for edge in obstruction.get("ring").get("edges"):
+                edge_dict = {
+                    "bearingVector": edge.get("bearingVector"),
+                    "angleBetweenBearingVectorAndUpVector": edge.get("angleBetweenBearingVectorAndUpVector"),
+                    "angleBetweenBearingVectorAndRightVector": edge.get("angleBetweenBearingVectorAndRightVector"),
+                    "edge_condition": edge.get("edgeCondition"),
+                    "siding_material": edge.get("sidingMaterial"),
+                    "start_point": edge["startPoint"],
+                    "end_point": edge["endPoint"]
+                }
+                edges.append(edge_dict)
+
+           
+            # Generate a unique feature_id
+            unique_feature_id = unique_feature_id_counter
+            unique_feature_id_counter += 1
+            # Add the necessary keys to the dictionary 
+            obstruction_dict = {
+                "feature_id": unique_feature_id, 
+                "home_id": home_id,
+                "installation_id": installation_id,
+                "external_sitemodel_sourceid": external_sitemodel_sourceid,
+                "date_created": date_created,
+                "version": version,
+                "obstruction_id": obstruction["id"],
+                "shape_type": obstruction["shapeType"],
+                "feature_name": obstruction["featureName"],
+                "center": obstruction["center"],
+                "radius": obstruction["radius"],
+                "units": units,
+                "north_vector": north_vector,
+                "heading_vector": heading_vector,   
+                "building_polygon": building_polygon,
+                "edges": edges
+              
+            }
+            # Add the dictionary to the list
+            obstruction_dicts.append(obstruction_dict)
+
+        # Create a DataFrame from the list of dictionaries
+        obstructions_df = pd.json_normalize(obstruction_dicts, record_path="edges", meta=["feature_id","home_id","installation_id","external_sitemodel_sourceid","date_created","version",
+            "obstruction_id", "shape_type", "feature_name", "center", "radius","units","north_vector","heading_vector","building_polygon"
+        ])
+
+        feature_engineering_roof_list.append(obstructions_df)
+       
+# Create DataFrames
+building_fact_df = pd.DataFrame(building_fact_list)
+building_dim_df = pd.DataFrame(building_dim_list)
+mounting_plane_angle_df = pd.DataFrame(mounting_plane_angle_list)
+
+# Concatenate all feature_engineering_roof DataFrames into a single DataFrame
+feature_engineering_roof_df = pd.concat(feature_engineering_roof_list, ignore_index=True)
+feature_engineering_roof_df_column_order = [
+    "feature_id", "home_id", "installation_id", "external_sitemodel_sourceid", "date_created", "version",
+    "obstruction_id", "shape_type", "feature_name", "center", "radius", "units", "north_vector", "heading_vector",
+    "building_polygon", "bearingVector", "angleBetweenBearingVectorAndUpVector",
+    "angleBetweenBearingVectorAndRightVector", "edge_condition", "siding_material", "start_point.x","start_point.y","start_point.z","end_point.x","end_point.y","end_point.z"
+]
+feature_engineering_roof_df = feature_engineering_roof_df[feature_engineering_roof_df_column_order]
+
+# print(feature_engineering_roof_df.columns)
+# Step 4: Output the results in a CSV file
+os.makedirs('output', exist_ok=True)
+building_fact_df.to_csv("output/building_fact.csv", index=False)
+building_dim_df.to_csv("output/building_dim.csv", index=False)
+mounting_plane_angle_df.to_csv("output/mounting_plane_angle.csv", index=False)
+feature_engineering_roof_df.to_csv("output/feature_engineering_roof.csv", index=False)
+
